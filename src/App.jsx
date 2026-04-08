@@ -440,10 +440,18 @@ function CounterPage({ categories, setCategories, settings, setSettings }) {
   const adjustTotal = (d) => {
     const ts = fmtTime(new Date());
     const zoneName = selZone ? (zones.find(z => z.id === selZone)?.name || "") : "";
-    setLog(p => [{ delta: d, time: ts, total: Math.max(0, (crowd?.currentValue || 0) + d), zone: zoneName }, ...p].slice(0, 50));
-    setCategories(p => p.map(c => c.id === "crowd" ? { ...c, currentValue: Math.max(0, c.currentValue + d), lastUpdated: new Date().toLocaleTimeString("ko-KR") } : c));
+    const newTotal = Math.max(0, (crowd?.currentValue || 0) + d);
+    setLog(p => [{ delta: d, time: ts, total: newTotal, zone: zoneName }, ...p].slice(0, 50));
+    setCategories(p => p.map(c => c.id === "crowd" ? { ...c, currentValue: newTotal, lastUpdated: new Date().toLocaleTimeString("ko-KR") } : c));
+    // 인파 데이터를 별도 키로 저장 (다른 기기의 기상 업데이트와 충돌 방지)
+    const fid = settings.festivalId || "default";
+    const crowdSync = { value: newTotal, time: new Date().toISOString(), zones: settings.zones };
+    window.storage.set(`${fid}_crowd_sync`, JSON.stringify(crowdSync)).catch(() => {});
     if (selZone) {
-      setSettings(prev => ({ ...prev, zones: prev.zones.map(z => z.id === selZone ? { ...z, count: Math.max(0, (z.count || 0) + d) } : z) }));
+      const newZones = (settings.zones || []).map(z => z.id === selZone ? { ...z, count: Math.max(0, (z.count || 0) + d) } : z);
+      setSettings(prev => ({ ...prev, zones: newZones }));
+      crowdSync.zones = newZones;
+      window.storage.set(`${fid}_crowd_sync`, JSON.stringify(crowdSync)).catch(() => {});
     }
   };
 
@@ -1166,28 +1174,35 @@ function AuthenticatedApp({ session, accounts, setAccounts, onLogout, initialPag
   useCustomApiFetcher(categories, setCategories, settings, active, refreshKey);
   useHistoryRecorder(categories, setCategories, active);
 
-  // 인파관리 30초 동기화 (계수원 입력 빠른 반영)
+  // 인파관리 실시간 동기화 (별도 키로 충돌 방지, 5초 간격)
   useEffect(() => {
     if (!active) return;
+    const fid = session.festivalId || "default";
+    let lastCrowdValue = null;
+
     const crowdSync = setInterval(async () => {
       try {
-        const fid = session.festivalId || "default";
-        const r = await window.storage.get(`${fid}_cat_v10`);
+        const r = await window.storage.get(`${fid}_crowd_sync`);
         if (r?.value) {
-          const remote = JSON.parse(r.value);
-          const remoteCrowd = remote.find(c => c.id === "crowd");
-          if (remoteCrowd) {
+          const data = JSON.parse(r.value);
+          if (data.value !== undefined && data.value !== lastCrowdValue) {
+            lastCrowdValue = data.value;
             setCategories(prev => {
               const local = prev.find(c => c.id === "crowd");
-              if (local && local.currentValue !== remoteCrowd.currentValue) {
-                return prev.map(c => c.id === "crowd" ? { ...c, currentValue: remoteCrowd.currentValue, lastUpdated: remoteCrowd.lastUpdated || new Date().toLocaleTimeString("ko-KR") } : c);
+              if (local && local.currentValue !== data.value) {
+                return prev.map(c => c.id === "crowd" ? { ...c, currentValue: data.value, lastUpdated: new Date().toLocaleTimeString("ko-KR") } : c);
               }
               return prev;
             });
+            // 구역 데이터도 동기화
+            if (data.zones) {
+              setSettings(prev => ({ ...prev, zones: data.zones }));
+            }
           }
         }
       } catch {}
-    }, 30000);
+    }, 5000);
+
     return () => clearInterval(crowdSync);
   }, [active]);
 
